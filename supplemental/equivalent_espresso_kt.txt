@@ -1,0 +1,401 @@
+// =============================================================================
+//  equivalent_espresso.kt
+//
+//  NOT RUNNABLE — for reference and discussion only.
+//
+//  This file shows what the Appium/Python tests would look like if the
+//  Android layer were tested with Espresso — Google's native Android UI
+//  testing framework.
+//
+//  Espresso vs Appium on Android:
+//    Appium wraps UiAutomator2, which is Google's out-of-process testing tool.
+//    Espresso runs IN-PROCESS — it's compiled into your test APK and has
+//    direct access to the app's Activity, Views, and threads.
+//    That in-process architecture is why Espresso is faster and more reliable
+//    than both Appium AND UiAutomator2 for pure Android testing.
+// =============================================================================
+
+package com.saucelabs.mydemoapp.tests
+
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.action.ViewActions.*
+import androidx.test.espresso.assertion.ViewAssertions.doesNotExist
+import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.ViewMatchers.*
+import androidx.test.ext.junit.rules.ActivityScenarioRule
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertEquals
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+
+// =============================================================================
+//  BASE TEST CLASS  (equivalent of conftest.py + driver fixture)
+// =============================================================================
+
+/**
+ * BaseTest holds the ActivityScenarioRule (which launches the app) and any
+ * shared setup. In Espresso, the test APK is installed alongside the app APK
+ * and the framework launches the Activity directly — no external server,
+ * no driver session, no capability dict.
+ *
+ * WHY @RunWith(AndroidJUnit4::class)?
+ *   This annotation tells JUnit to use Android's instrumentation runner, which
+ *   gives Espresso access to the app's process, Context, and Activity lifecycle.
+ */
+@RunWith(AndroidJUnit4::class)
+abstract class BaseTest {
+
+    /**
+     * ActivityScenarioRule launches the main Activity before each test and
+     * closes it afterward. This is Espresso's equivalent of the `driver`
+     * fixture in conftest.py — it handles setup and teardown automatically.
+     *
+     * WHY a @Rule instead of @Before?
+     *   @Rule has tighter lifecycle integration — it wraps the entire test
+     *   method including @Before and @After. If the Activity fails to launch,
+     *   the Rule reports the failure clearly rather than letting @Before crash
+     *   with a confusing NPE.
+     */
+    @get:Rule
+    val activityRule = ActivityScenarioRule(MainActivity::class.java)
+
+    val validUsername = "bob@example.com"
+    val validPassword = "10203040"
+}
+
+
+// =============================================================================
+//  PAGE OBJECTS
+//
+//  Espresso doesn't have a built-in Page Object pattern. The community approach
+//  is Kotlin objects with methods that encapsulate the onView() calls — same
+//  goal as Python's LoginPage class, different syntax.
+//
+//  Compared to Appium:
+//    Appium: driver.find_element(AppiumBy.ACCESSIBILITY_ID, "Login")
+//    Espresso: onView(withContentDescription("Login"))
+//
+//  The locator strategy differs (Appium uses WebDriver syntax, Espresso uses
+//  Hamcrest matchers) but the concept is identical: describe WHAT to find,
+//  not WHERE it is in pixels.
+// =============================================================================
+
+object LoginPage {
+
+    // WHY withContentDescription?
+    //   React Native's testID prop maps to contentDescription on Android.
+    //   This is the same attribute Appium queries via ACCESSIBILITY_ID.
+    //   withContentDescription is Espresso's Hamcrest matcher for it.
+    //
+    //   WHY not R.id.username_field?
+    //   React Native generates view IDs dynamically. contentDescription is the
+    //   stable, developer-set identifier — same reasoning as using
+    //   accessibilityIdentifier on iOS over dynamic view tags.
+
+    fun enterUsername(username: String) {
+        onView(withId(R.id.nameET))
+            .perform(clearText(), typeText(username), closeSoftKeyboard())
+    }
+
+    fun enterPassword(password: String) {
+        onView(withId(R.id.passwordET))
+            .perform(clearText(), typeText(password), closeSoftKeyboard())
+    }
+
+    fun tapLoginButton() {
+        // WHY closeSoftKeyboard() in enterPassword but not here?
+        //   Espresso's closeSoftKeyboard() dismisses it as part of the ViewAction
+        //   chain on the text field — before we ever try to click Login.
+        //   No keyboard-fighting hack required. This is one of Espresso's
+        //   ergonomic advantages over Appium on Android — see the Problems Faced
+        //   section in the README for the iOS equivalent nightmare.
+        onView(withContentDescription("Tap to login with given credentials"))
+            .perform(click())
+    }
+
+    fun login(username: String, password: String) {
+        enterUsername(username)
+        enterPassword(password)
+        tapLoginButton()
+    }
+
+    // ── State queries ─────────────────────────────────────────────────────────
+
+    fun isUsernameErrorDisplayed(): Boolean {
+        // Espresso's check() doesn't return a boolean directly — the idiomatic
+        // pattern is try/catch around a check that would throw on failure.
+        // In a real project you'd write a custom ViewAssertion for this.
+        return try {
+            onView(withId(R.id.nameErrorTV)).check(matches(isDisplayed()))
+            true
+        } catch (e: AssertionError) {
+            false
+        }
+    }
+
+    fun isPasswordErrorDisplayed(): Boolean {
+        return try {
+            onView(withId(R.id.passwordErrorTV)).check(matches(isDisplayed()))
+            true
+        } catch (e: AssertionError) {
+            false
+        }
+    }
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+
+    /**
+     * WHY isDisplayed() vs withEffectiveVisibility?
+     *   isDisplayed() in Espresso is the equivalent of isHittable in XCUITest —
+     *   it confirms the view is on screen, visible, and not covered. It's the
+     *   right check for "can the user see this error message."
+     *
+     *   withEffectiveVisibility checks the VISIBILITY XML attribute — an element
+     *   can have visibility=VISIBLE but still be obscured or off-screen.
+     *   isDisplayed() is the stricter, more correct check.
+     */
+    fun verifyUsernameErrorDisplayed() {
+        onView(withId(R.id.nameErrorTV))
+            .check(matches(isDisplayed()))
+    }
+
+    fun verifyPasswordErrorDisplayed() {
+        onView(withId(R.id.passwordErrorTV))
+            .check(matches(isDisplayed()))
+    }
+}
+
+
+object ProductsPage {
+
+    fun isLoaded(): Boolean {
+        return try {
+            onView(withId(R.id.productTV)).check(matches(isDisplayed()))
+            true
+        } catch (e: AssertionError) {
+            false
+        }
+    }
+
+    fun verifyLoaded() {
+        onView(withId(R.id.productTV))
+            .check(matches(isDisplayed()))
+    }
+
+    /**
+     * WHY doesNotExist() instead of isNotDisplayed()?
+     *   isNotDisplayed() checks that a view EXISTS but is hidden.
+     *   doesNotExist() checks that the view is not in the hierarchy at all.
+     *   After a failed login the Products screen hasn't been created — it's
+     *   absent, not just hidden. doesNotExist() is the correct assertion.
+     *
+     *   This is a common Espresso gotcha — getting this wrong gives
+     *   false passes when the view exists but is scrolled off screen.
+     */
+    fun verifyNotVisible() {
+        onView(withId(R.id.productTV))
+            .check(doesNotExist())
+    }
+
+    fun tapFirstProduct() {
+        // productIV is the tappable element on each product card — confirmed via
+        // adb uiautomator dump (clickable="true"). titleTV looks right but has
+        // clickable="false" and silently ignores taps.
+        // RecyclerViewActions targets the first item by position.
+        onView(withId(R.id.productRV))
+            .perform(RecyclerViewActions.actionOnItemAtPosition<RecyclerView.ViewHolder>(0,
+                clickChildViewWithId(R.id.productIV)
+            ))
+    }
+
+    fun tapCartIcon() {
+        onView(withContentDescription("cart badge"))
+            .perform(click())
+    }
+}
+
+
+object ProductDetailPage {
+
+    fun getProductTitle(): String {
+        // Espresso can't directly return element text — the idiomatic approach
+        // is a custom ViewAction that reads the text and stores it in a variable.
+        // This is one area where Appium is more ergonomic: element.text is a
+        // simple property. Espresso requires boilerplate for the same thing.
+        var titleText = ""
+        onView(withContentDescription("product title"))
+            .perform(object : ViewAction {
+                override fun getConstraints() = isDisplayed()
+                override fun getDescription() = "Get text from product title"
+                override fun perform(uiController: UiController, view: View) {
+                    titleText = (view as TextView).text.toString()
+                }
+            })
+        return titleText
+    }
+
+    fun tapAddToCart() {
+        onView(withContentDescription("Add To Cart button"))
+            .perform(click())
+    }
+
+    fun verifyCartBadgeCount(expected: Int) {
+        // Asserting directly is more idiomatic Espresso than capturing a value.
+        // Asserting on the badge text as a string since withText() takes a String.
+        onView(withContentDescription("cart badge"))
+            .check(matches(withText(expected.toString())))
+    }
+}
+
+
+object CartPage {
+
+    fun verifyLoaded() {
+        onView(withText("My Cart"))
+            .check(matches(isDisplayed()))
+    }
+
+    fun verifyFirstItemName(expected: String) {
+        onView(withContentDescription("product label"))
+            .check(matches(withText(expected)))
+    }
+
+    fun verifyFirstItemQuantity(expected: Int) {
+        onView(withContentDescription("product quantity"))
+            .check(matches(withText(expected.toString())))
+    }
+}
+
+
+// =============================================================================
+//  TC-01 — LOGIN TESTS
+//  Mirrors tests/test_login.py::TestLogin
+// =============================================================================
+
+@RunWith(AndroidJUnit4::class)
+class LoginTests : BaseTest() {
+
+    @Test
+    fun testLogin() {
+        // Mirrors test_login.py::TestLogin::test_login
+        // Happy path — valid credentials should land on the Products screen.
+        LoginPage.login(validUsername, validPassword)
+        ProductsPage.verifyLoaded()
+    }
+
+    @Test
+    fun testInvalidCredentials() {
+        // Mirrors test_login.py::TestLogin::test_invalid_credentials
+        // Known app bug: the app accepts any password for a registered username
+        // and silently logs in instead of showing a validation error.
+        // Marked @Ignore in a real project to document without failing CI.
+        // Equivalent of pytest.mark.xfail(strict=False) in the Appium suite.
+        LoginPage.login("bob@example.com", "definitelywrong")
+        LoginPage.verifyUsernameErrorDisplayed()
+        // ^ This assertion will fail due to the known bug.
+        // In a real project: @Ignore("Known bug: app accepts wrong passwords")
+    }
+
+    @Test
+    fun testUsernameRequired() {
+        // Mirrors test_login.py::TestLogin::test_username_required
+        // Submitting with no username should show a username error.
+        LoginPage.login("", "somepassword")
+        LoginPage.verifyUsernameErrorDisplayed()
+        ProductsPage.verifyNotVisible()
+    }
+
+    @Test
+    fun testPasswordRequired() {
+        // Mirrors test_login.py::TestLogin::test_password_required
+        // Submitting with no password should show a password error.
+        LoginPage.login("bob@example.com", "")
+        LoginPage.verifyPasswordErrorDisplayed()
+        ProductsPage.verifyNotVisible()
+    }
+}
+
+
+// =============================================================================
+//  TC-02 — ADD TO CART
+//  Mirrors tests/test_add_to_cart.py::TestAddToCart::test_add_to_cart_android
+// =============================================================================
+
+@RunWith(AndroidJUnit4::class)
+class AddToCartTests : BaseTest() {
+
+    @Test
+    fun testAddFirstProductToCart() {
+        // Mirrors the full flow in ProductsPage.assert_add_to_cart_flow()
+        // in the Appium suite. In Espresso, the assertions are inline here
+        // rather than extracted to a page method — both are valid patterns.
+        LoginPage.login(validUsername, validPassword)
+
+        ProductsPage.tapFirstProduct()
+
+        // Capture the product title before adding.
+        // WHY capture first? Same reasoning as the Appium suite — we're asserting
+        // that WHATEVER we added is what ends up in the cart, not hardcoding
+        // "Sauce Labs Backpack". Makes the test resilient to catalog changes.
+        //
+        // NOTE: Getting text in Espresso requires a custom ViewAction (see
+        // ProductDetailPage.getProductTitle()). This is boilerplate Appium
+        // doesn't need — element.text is a one-liner there.
+        val productTitle = ProductDetailPage.getProductTitle()
+
+        ProductDetailPage.tapAddToCart()
+
+        // Verify the cart badge updated before navigating.
+        // Same guard assertion as the Appium suite — if the badge didn't update,
+        // the Add to Cart tap silently failed.
+        ProductDetailPage.verifyCartBadgeCount(1)
+
+        ProductsPage.tapCartIcon()
+
+        CartPage.verifyLoaded()
+        CartPage.verifyFirstItemName(productTitle)
+        CartPage.verifyFirstItemQuantity(1)
+    }
+}
+
+
+// =============================================================================
+//  ESPRESSO ADVANTAGES OVER APPIUM (on Android)
+//
+//  1. IN-PROCESS SPEED — Espresso runs inside the app's process. No HTTP hops
+//     to an Appium server, no UiAutomator2 bridge. Commands execute in ~5ms
+//     vs ~50-100ms via Appium. A 50-test suite can be 5-10 minutes faster.
+//
+//  2. AUTOMATIC SYNCHRONISATION — Espresso's killer feature: it automatically
+//     waits for the UI thread, AsyncTasks, and OkHttp requests to be idle
+//     before executing each action. You rarely need explicit waits.
+//     Appium has no equivalent — you write WebDriverWait for everything.
+//
+//  3. KEYBOARD HANDLING — closeSoftKeyboard() is a first-class ViewAction that
+//     runs as part of the interaction chain. No fighting the keyboard before
+//     tapping buttons. See the "Problems Faced" section in the README for how
+//     painful this was on the iOS/Appium side.
+//
+//  4. VIEW HIERARCHY ACCESS — Espresso can inspect any View property, not just
+//     what's exposed via accessibility attributes. Internal state, adapter
+//     counts, drawable states — all accessible.
+//
+//  5. HAMCREST MATCHERS — Espresso's ViewMatchers compose with standard Hamcrest:
+//     onView(allOf(withText("Login"), isDisplayed(), not(isEnabled())))
+//
+//  ESPRESSO DISADVANTAGES
+//
+//  1. ANDROID ONLY — No iOS. Need a separate XCUITest project for full coverage.
+//
+//  2. JAVA/KOTLIN ONLY — The team must know Android. Python devs can't contribute.
+//
+//  3. READING VALUES — Capturing element text for assertions requires a custom
+//     ViewAction (see ProductDetailPage.getProductTitle()). Appium's element.text
+//     is three characters. This is Espresso's most ergonomic rough spot.
+//
+//  4. NO CLOUD FARM OUT-OF-BOX — BrowserStack/Sauce Labs support Espresso but
+//     require their own runner adapters. Appium works with any cloud farm that
+//     speaks WebDriver with zero adapter code.
+// =============================================================================

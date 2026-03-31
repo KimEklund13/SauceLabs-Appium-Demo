@@ -1,0 +1,30 @@
+# Environment — never commit credentials or local paths
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# App binaries — large, binary, downloaded separately (see README)
+apps/
+
+# Test output
+report.html
+assets/
+.pytest_cache/
+*.log
+
+# macOS
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,397 @@
+// =============================================================================
+//  equivalent_xcuitest.swift
+//
+//  NOT RUNNABLE — for reference and discussion only.
+//
+//  This file shows what the three Appium/Python tests would look like if the
+//  app were written natively in Swift and tested with Apple's XCUITest framework.
+//
+//  Compare side-by-side with the Appium/Python project to understand:
+//    - What XCUITest gives you for free that Appium requires you to configure
+//    - Where Appium's cross-platform value shows up
+//    - Why the Page Object pattern and protocol-oriented design look similar
+//      in both — the architecture is the same, only the language/framework differs
+// =============================================================================
+
+import XCTest
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ARCHITECTURE NOTE — Protocol-Oriented Page Objects
+//
+//  Instead of Python's BasePage class that page objects inherit from,
+//  XCUITest uses protocols + extensions to compose behavior. In the Swift
+//  project you shared, CubicIDProtocol and FavoritesProtocol both had
+//  extensions that provided action/assertion methods.
+//
+//  That's the same Page Object Model, expressed in Swift idioms.
+//  The goal is identical: keep locators and interactions OUT of test methods.
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TESTBASE  (equivalent of conftest.py)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class TestBase: XCTestCase {
+    var app = XCUIApplication()
+    let validUsername = "bob@example.com"
+    let validPassword = "10203040"
+
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+        // XCUITest launches the app automatically via Xcode's test runner —
+        // there is NO separate Appium server process to start. This is one of
+        // the biggest practical differences: XCUITest is zero-infrastructure.
+        app.launch()
+    }
+
+    override func tearDown() {
+        app.terminate()
+        super.tearDown()
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PAGE OBJECT — LOGIN
+// ─────────────────────────────────────────────────────────────────────────────
+
+protocol LoginProtocol {}
+
+extension LoginProtocol {
+    var app: XCUIApplication { XCUIApplication() }
+
+    // WHY accessibilityIdentifier instead of XPath?
+    //   In native Swift/iOS tests, accessibilityIdentifier is the direct property
+    //   on UIView — you set it in code and query it with .identifier.
+    //   There's no parsing involved, no string-matching overhead, and it's
+    //   stable across layout changes. In Appium we also use ACCESSIBILITY_ID,
+    //   which maps to the same identifier but goes through the Appium server.
+
+    func enterUsername(_ username: String) {
+        let field = app.textFields.firstMatch
+        _ = field.waitForExistence(timeout: 10)
+        field.tap()
+        field.typeText(username)
+    }
+
+    func enterPassword(_ password: String) {
+        let field = app.secureTextFields.firstMatch
+        _ = field.waitForExistence(timeout: 10)
+        field.tap()
+        field.typeText(password)
+    }
+
+    func tapLoginButton() {
+        // WHY dismiss keyboard before tapping?
+        //   Same problem we hit in the Appium suite: the software keyboard can
+        //   cover the Login button. In XCUITest the idiomatic fix is to call
+        //   typeText on the last field and rely on the Return key, or tap a
+        //   toolbar Done button. In the Appium suite we had to reach for a hack —
+        //   see the Problems Faced section in the README.
+        app.keyboards.firstMatch.buttons["return"].tap()
+        let button = app.buttons["Login"]
+        _ = button.waitForExistence(timeout: 10)
+        button.tap()
+    }
+
+    func login(username: String, password: String) {
+        enterUsername(username)
+        enterPassword(password)
+        tapLoginButton()
+    }
+
+    // ── State queries ─────────────────────────────────────────────────────────
+
+    func userIsSignedIn() -> Bool {
+        // Equivalent of LoginPage.user_is_successfully_signed_in() in Python.
+        // Open the More tab and check for the Log Out menu item.
+        app.tabBars.buttons["More-tab-item"].tap()
+        let logoutButton = app.buttons["LogOut-menu-item"]
+        let exists = logoutButton.waitForExistence(timeout: 5)
+        // Close the menu by tapping Catalog before returning
+        app.tabBars.buttons["Catalog-tab-item"].tap()
+        return exists
+    }
+
+    // ── Error assertions ──────────────────────────────────────────────────────
+
+    // WHY check alerts instead of staticTexts["generic-error-message"]?
+    //   This app surfaces login validation errors as iOS system alert dialogs,
+    //   not as inline UI elements. The Python Appium suite discovered this
+    //   at runtime — iOS threw an UnexpectedAlertOpenException instead of
+    //   the element appearing in the view hierarchy. The fix on the Appium side
+    //   was driver.switch_to.alert. The XCUITest equivalent is app.alerts.
+    //
+    //   Note: the Android app DOES show inline error TextViews, which is why
+    //   the Appium suite has separate iOS/Android branches in LoginPage.
+
+    func isUsernameErrorDisplayed() -> Bool {
+        let alert = app.alerts.firstMatch
+        guard alert.waitForExistence(timeout: 5) else { return false }
+        let text = alert.staticTexts.allElementsBoundByIndex
+            .map { $0.label.lowercased() }
+            .joined()
+        alert.buttons.firstMatch.tap()  // dismiss so next step isn't blocked
+        return text.contains("username")
+    }
+
+    func isPasswordErrorDisplayed() -> Bool {
+        let alert = app.alerts.firstMatch
+        guard alert.waitForExistence(timeout: 5) else { return false }
+        let text = alert.staticTexts.allElementsBoundByIndex
+            .map { $0.label.lowercased() }
+            .joined()
+        alert.buttons.firstMatch.tap()
+        return text.contains("password")
+    }
+
+    func verifyProductsScreenNotVisible() {
+        // waitForExistence with a short timeout — if it appears, that's a bug.
+        // doesNotExist() on the Espresso side has the same logic.
+        XCTAssertFalse(
+            app.staticTexts["title"].waitForExistence(timeout: 3),
+            "Products screen appeared despite invalid credentials."
+        )
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PAGE OBJECT — PRODUCTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+protocol ProductsProtocol {}
+
+extension ProductsProtocol {
+    var app: XCUIApplication { XCUIApplication() }
+
+    func verifyProductsScreenLoaded() {
+        let header = app.staticTexts["title"]
+        XCTAssertTrue(
+            header.waitForExistence(timeout: 15),
+            "Products screen did not load. Header not found."
+        )
+    }
+
+    func tapFirstProduct() {
+        // XCUITest can query by index directly on the element type without XPath.
+        // element(boundBy: 0) is more readable than the XPath [1] approach
+        // Appium requires. Note: XCUITest is 0-indexed; XPath is 1-indexed.
+        let firstItem = app.otherElements.matching(identifier: "store item").element(boundBy: 0)
+        _ = firstItem.waitForExistence(timeout: 15)
+        firstItem.tap()
+    }
+
+    func tapCartIcon() {
+        // "Cart-tab-item" confirmed via ios_dump.py — bottom tab bar cart button.
+        let cartIcon = app.buttons["Cart-tab-item"]
+        _ = cartIcon.waitForExistence(timeout: 10)
+        cartIcon.tap()
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PAGE OBJECT — PRODUCT DETAIL
+// ─────────────────────────────────────────────────────────────────────────────
+
+protocol ProductDetailProtocol {}
+
+extension ProductDetailProtocol {
+    var app: XCUIApplication { XCUIApplication() }
+
+    func getProductTitle() -> String {
+        // No stable accessibility ID on iOS — the element name is the literal product
+        // name (e.g. "Sauce Labs Backpack - Black"). Second StaticText in hierarchy:
+        // [0] = "Products" nav label, [1] = product name, [2] = "Price".
+        // Long-term fix: add testID to the title element in the RN source.
+        let titleElement = app.staticTexts.element(boundBy: 1)
+        _ = titleElement.waitForExistence(timeout: 10)
+        return titleElement.label
+    }
+
+    func tapAddToCart() {
+        // "AddToCart" confirmed via ios_dump.py.
+        // NOTE: Android uses "Tap to add product to cart" — different platforms,
+        // different accessibility IDs despite the same React Native source.
+        let addButton = app.buttons["AddToCart"]
+        _ = addButton.waitForExistence(timeout: 10)
+        addButton.tap()
+    }
+
+    func getCartBadgeCount() -> Int {
+        let badge = app.staticTexts["cart badge"]
+        guard badge.waitForExistence(timeout: 5) else { return 0 }
+        return Int(badge.label) ?? 0
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PAGE OBJECT — CART
+// ─────────────────────────────────────────────────────────────────────────────
+
+protocol CartProtocol {}
+
+extension CartProtocol {
+    var app: XCUIApplication { XCUIApplication() }
+
+    func verifyCartLoaded() {
+        let title = app.staticTexts["My Cart"]
+        XCTAssertTrue(title.waitForExistence(timeout: 15),
+                      "Cart screen did not load.")
+    }
+
+    func getCartItemCount() -> Int {
+        // No cart item container ID on iOS — count product name elements instead.
+        // Each cart row has exactly one product name StaticText after "My Cart".
+        // This is a workaround for missing testIDs in the RN source.
+        return app.staticTexts.matching(identifier: "Sauce Labs Backpack - Black").count
+    }
+
+    func getFirstItemName() -> String {
+        // Second StaticText on cart screen — [0] is "My Cart", [1] is product name.
+        return app.staticTexts.element(boundBy: 1).label
+    }
+
+    func getFirstItemQuantity() -> Int {
+        // No explicit quantity ID. The quantity is the only purely numeric StaticText
+        // on the cart screen — find it by filtering for a numeric label.
+        // In XCUITest there is no translate() — we match by known position:
+        // quantity sits between the SubtractMinus and AddPlus stepper buttons.
+        let steppers = app.buttons.matching(identifier: "SubtractMinus Icons")
+        guard steppers.count > 0 else { return 0 }
+        // The StaticText immediately after the subtract button in the accessibility tree
+        // is the quantity — get it via coordinate-based ordering if needed,
+        // or simply read the stepper value if the app exposes one.
+        // Simplest reliable approach for this app:
+        let allTexts = app.staticTexts.allElementsBoundByIndex
+        for text in allTexts {
+            if let _ = Int(text.label) { return Int(text.label) ?? 0 }
+        }
+        return 0
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TC-01 — SUCCESSFUL LOGIN
+// ─────────────────────────────────────────────────────────────────────────────
+
+final class LoginTests: TestBase, LoginProtocol, ProductsProtocol {
+
+    func testLogin() {
+        // Mirrors test_login.py::TestLogin::test_login
+        // NO platform branching here — XCUITest runs one platform.
+        // The Appium suite handles both platforms from a single test method
+        // by driving the same test logic against two different drivers.
+        login(username: validUsername, password: validPassword)
+        XCTAssertTrue(userIsSignedIn(), "Expected LogOut to be visible after login.")
+    }
+
+    // WHY XCTExpectFailure instead of just skipping?
+    //   This mirrors the pytest.mark.xfail on test_invalid_credentials in the
+    //   Appium suite. The bug: the app accepts any password for a registered
+    //   email and silently logs the user in. XCTExpectFailure documents the
+    //   known failure without marking the test run as broken — same intent as
+    //   xfail(strict=False) in pytest.
+    func testInvalidCredentials() {
+        XCTExpectFailure("Known app bug: valid email + wrong password silently succeeds instead of showing an error.")
+        login(username: "bob@example.com", password: "definitelywrong")
+        XCTAssertTrue(isUsernameErrorDisplayed() || isPasswordErrorDisplayed(),
+                      "Expected an error for invalid credentials.")
+    }
+
+    func testUsernameRequired() {
+        // Mirrors test_login.py::TestLogin::test_username_required
+        login(username: "", password: "somepassword")
+        XCTAssertTrue(isUsernameErrorDisplayed(),
+                      "Expected a username-required error when username is empty.")
+    }
+
+    func testPasswordRequired() {
+        // Mirrors test_login.py::TestLogin::test_password_required
+        login(username: "bob@example.com", password: "")
+        XCTAssertTrue(isPasswordErrorDisplayed(),
+                      "Expected a password-required error when password is empty.")
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TC-02 — ADD TO CART
+// ─────────────────────────────────────────────────────────────────────────────
+
+final class AddToCartTests: TestBase, LoginProtocol, ProductsProtocol,
+                            ProductDetailProtocol, CartProtocol {
+
+    func testAddFirstProductToCart() {
+        // Mirrors test_add_to_cart.py::TestAddToCart::test_add_to_cart_ios
+        login(username: validUsername, password: validPassword)
+
+        tapFirstProduct()
+        let productTitle = getProductTitle()
+        tapAddToCart()
+
+        // Verify badge count — same guard assertion as the Appium suite.
+        // If the badge doesn't update, no point navigating to the cart.
+        let badgeCount = getCartBadgeCount()
+        XCTAssertEqual(badgeCount, 1,
+                       "Cart badge should show 1 after adding one item, got \(badgeCount)")
+
+        tapCartIcon()
+        verifyCartLoaded()
+
+        XCTAssertEqual(getCartItemCount(), 1,
+                       "Expected 1 line-item in cart")
+
+        XCTAssertEqual(getFirstItemName(), productTitle,
+                       "Cart item name doesn't match what was added")
+
+        XCTAssertEqual(getFirstItemQuantity(), 1,
+                       "Expected quantity of 1")
+    }
+}
+
+
+// =============================================================================
+//  WHAT XCUITEST GIVES YOU THAT APPIUM DOESN'T (without extra configuration)
+//
+//  1. ZERO SETUP — No Appium server, no UiAutomator2 driver install, no .env
+//     file. Press Cmd+U in Xcode and tests run. Appium requires: Node, Appium
+//     server, a driver plugin, a running emulator/simulator, and your Python env.
+//
+//  2. DIRECT FRAMEWORK ACCESS — XCUITest IS the framework. Appium talks to
+//     XCUITest via WebDriverAgent (a local HTTP server it installs). That extra
+//     hop adds latency (~30-50ms per command) and an additional failure point.
+//
+//  3. FIRST-CLASS IDE SUPPORT — Xcode's test navigator, inline failure markup,
+//     screenshot attachments on failure, and coverage reports all work out of
+//     the box. Appium requires separate tooling for most of these.
+//
+//  4. BREAKPOINT DEBUGGING — You can set a breakpoint in a test, pause, and
+//     inspect live UI state in Xcode's accessibility inspector. Appium debugging
+//     requires Appium Inspector as a separate app.
+//
+//  5. PERFORMANCE TESTING — XCUITest has built-in XCTMetrics for CPU, memory,
+//     launch time, and scroll performance measurements. Appium has no equivalent.
+//
+//  WHAT APPIUM GIVES YOU THAT XCUITEST DOESN'T
+//
+//  1. CROSS-PLATFORM — One Python file, one Page Object, runs on Android AND
+//     iOS. With XCUITest you have two entirely separate projects in two languages.
+//
+//  2. LANGUAGE CHOICE — Python, JavaScript, Java, Ruby, C#. XCUITest = Swift/ObjC.
+//
+//  3. CLOUD FARM INTEGRATION — BrowserStack, Sauce Labs, LambdaTest all speak
+//     the same WebDriver protocol Appium uses. You swap one URL and your existing
+//     test suite runs on hundreds of real devices in the cloud.
+//     XCUITest requires Apple's own XCode Cloud or specific BrowserStack/AWS
+//     Device Farm adapters.
+//
+//  4. REACT NATIVE / FLUTTER / HYBRID — For cross-platform apps (like this demo),
+//     Appium treats Android and iOS identically from the test's perspective.
+//     XCUITest can only test the iOS layer; Espresso can only test Android.
+// =============================================================================
